@@ -34,7 +34,6 @@ void dumpSection(const ELFIO::section *section, bool printContents = true) {
   std::cout << "section name : " << section->get_name() << '\n';
   std::cout << "section size : " << section->get_size() << '\n';
   std::cout << "offset in file : " << section->get_offset() << '\n';
-  std::cout << "offset in file : " << section->get_address() << '\n';
 
   if (!printContents)
     return;
@@ -49,93 +48,85 @@ void dumpSection(const ELFIO::section *section, bool printContents = true) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
+  if (argc != 4) {
     std::cout << "exactly 3 arguments to " << argv[0] << " expected\n";
     showHelp(argv[0]);
     exit(1);
   }
 
-  const char *bigPath = argv[1];
-  const char *smallPath = argv[2];
+  const char *ogExecPath= argv[1];
+  const char *newFatbinPath = argv[2];
+  const char *rwExecPath = argv[3];
 
-  ELFIO::elfio bigFile;
-  ELFIO::elfio smallFile;
+  ELFIO::elfio ogExec;
+  std::ifstream newFatbin;
 
-  if (!bigFile.load(bigPath)) {
-    std::cout << "can't find or process ELF file " << bigPath << '\n';
+  if (!ogExec.load(ogExecPath)) {
+    std::cout << "can't find or process ELF file " << ogExecPath << '\n';
     exit(1);
   }
 
-  if (!smallFile.load(smallPath)) {
-    std::cout << "can't find or process ELF file " << smallPath << '\n';
+    ELFIO::section *fatbinSection = getFatbinSection(ogExec);
+  if (!fatbinSection) {
+    std::cout << ".hip_fatbin section in " << ogExecPath << "\n";
     exit(1);
   }
 
-  ELFIO::section *bigFatbinSection = getFatbinSection(bigFile);
-  if (!bigFatbinSection) {
-    std::cout << ".hip_fatbin section in " << smallPath << "\n";
-    exit(1);
-  }
+  ELFIO::section *fatbinWrapperSection = getFatbinWrapperSection(ogExec);
 
-  ELFIO::section *smallFatbinSection = getFatbinSection(smallFile);
-  if (!smallFatbinSection) {
-    std::cout << ".hip_fatbin section in " << smallPath << "\n";
-    exit(1);
-  }
-
-  ELFIO::section *bigFatbinWrapperSection = getFatbinWrapperSection(bigFile);
-  ELFIO::section *smallFatbinWrapperSection =
-      getFatbinWrapperSection(smallFile);
-
-  std::cout << "dumps for " << bigPath << '\n';
-  dumpSection(bigFatbinSection, false);
-  dumpSection(bigFatbinWrapperSection);
+  dumpSection(fatbinSection, false);
+  std::cout << '\n';
+  dumpSection(fatbinWrapperSection);
   std::cout << std::endl;
-  std::cout << "dumps for " << smallPath << '\n';
-  dumpSection(smallFatbinSection, false);
-  dumpSection(smallFatbinWrapperSection);
 
-  // Step 1. take contents of smaller fatbin.
-  // Step 2. rewrite bigger elf section with smaller fatbin starting at offset + 20
-  // Step 3. modify third field of fatbinWrappersection i.e 8th byte onwards to hold the new fatbin-offset
-  // Step 4. rewrite bigger file with the new contents.
+  newFatbin.open(newFatbinPath, std::ios::in);
+  newFatbin.seekg(0, std::ifstream::end);
+  int newFatbinSize = newFatbin.tellg();
+  newFatbin.seekg(0, std::ifstream::beg);
 
-  const char *smallFatbinContent = smallFatbinSection->get_data();
-  char *newBigFatbinContent = new char[bigFatbinSection->get_size()];
-  std::memcpy(newBigFatbinContent + 20, smallFatbinContent,
-              smallFatbinSection->get_size());
+  if (newFatbinSize > fatbinSection->get_size()) {
+    std::cout << "new fatbin is bigger than the one present in the executable\n";
+    exit(1);
+  }
 
-  char *newBigWrapperContents = new char[bigFatbinWrapperSection->get_size()];
-  std::memcpy(newBigWrapperContents, bigFatbinWrapperSection->get_data(), bigFatbinWrapperSection->get_size());
+  char *newFatbinContent = new char[fatbinSection->get_size()];
+  newFatbin.read(newFatbinContent, newFatbinSize);
+  newFatbin.close();
+
+  // char *newBigWrapperContents = new char[fatbinWrapperSection->get_size()];
+  // std::memcpy(newBigWrapperContents, fatbinWrapperSection->get_data(), fatbinWrapperSection->get_size());
 
   // read bytes 8 through 15 in bigWrapper, get the offset
-  size_t offset = 0;
-  char *offsetPtr = (char *)&offset;
-  for (int i = 0; i < 8; ++i) {
-    int idx = i + 8;
-    offsetPtr[i] = (char)newBigWrapperContents[idx];
-  }
+  // size_t offset = 0;
+  // char *offsetPtr = (char *)&offset;
+  // for (int i = 0; i < 8; ++i) {
+  //   int idx = i + 8;
+  //   offsetPtr[i] = (char)newBigWrapperContents[idx];
+  // }
+  //
+  // std::cout << std::hex;
+  // for (int i = 0; i < 8; ++i) {
+  //   std::cout << (unsigned)offsetPtr[i] << ' ';
+  // }
 
-  std::cout << std::hex;
-  for (int i = 0; i < 8; ++i) {
-    std::cout << (unsigned)offsetPtr[i] << ' ';
-  }
-  std::cout << '\n';
-  std::cout << std::dec << offset << '\n';
+  // std::cout << '\n';
+  // std::cout << std::dec << offset << '\n';
+  //
+  // offset += 20; // also change line 105 accordingly. works
+  //
+  // // write it to the buffer
+  // offsetPtr = (char *)&offset;
+  // for (int i = 0; i < 8; ++i) {
+  //   int idx = i + 8;
+  //   newBigWrapperContents[idx] = offsetPtr[i];
+  // }
+  //
+  // update fatbinSection and fatbinWrapperSection with updated data
 
-  offset += 20; // also change line 105 accordingly. works
-
-  // write it to the buffer
-  offsetPtr = (char *)&offset;
-  for (int i = 0; i < 8; ++i) {
-    int idx = i + 8;
-    newBigWrapperContents[idx] = offsetPtr[i];
-  }
-
-  // update bigFatbinSection and bigFatbinWrappersection with updated data
-  bigFatbinSection->set_data(newBigFatbinContent, bigFatbinSection->get_size());
-  bigFatbinWrapperSection->set_data(newBigWrapperContents, bigFatbinWrapperSection->get_size());
-
+  fatbinSection->set_data(newFatbinContent, fatbinSection->get_size());
+  // fatbinWrapperSection->set_data(newBigWrapperContents, fatbinWrapperSection->get_size());
+  //
   // rewrite with modifications
-  bigFile.save(std::string(bigPath) + "-rewritten");
+  ogExec.save(rwExecPath);
+
 }
