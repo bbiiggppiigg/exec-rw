@@ -4,11 +4,15 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <unordered_map>
 
 
 
 // This tool creates a clone of the original executable. The goal is to eventually add a new section and a new segment while cloning.
 
+
+  std::unordered_map<ELFIO::section *, ELFIO::section *> ogToNewSectionMap;
+  std::unordered_map<ELFIO::section *, ELFIO::section *> newToOgSectionMap;
 
 static void showHelp(const char *toolName) {
   std::cout << "usage : \n";
@@ -121,40 +125,44 @@ void cloneHeader(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   newExec.set_entry(ogExec.get_entry());
 }
 
+
 bool shouldClone(const ELFIO::section *section) {
   auto secType = section->get_type();
   switch (secType) {
+  // case ELFIO::SHT_NULL:
+  // case ELFIO::SHT_SYMTAB:
+  // case ELFIO::SHT_STRTAB:
   case ELFIO::SHT_PROGBITS:
   case ELFIO::SHT_NOBITS:
     return true;
   default:
     return false;
   }
-  // if(section->get_type() == ELFIO::SHT_NULL)
-  //   return false;
-  //
-  // if (section->get_name() == ".shstrtab" && section->get_type() ==
-  // ELFIO::SHT_STRTAB)
-  //   return false;
-  //
-  // if (section->get_type() == ELFIO::SHT_REL || section->get_type() ==
-  // ELFIO::SHT_RELA)
-  //   return false;
-  //
-  // return true;
 }
 
+// bool shouldCloneContents(const ELFIO::section *section) {
+//   auto secType = section->get_type();
+//   switch(secType) {
+//     case ELFIO::SHT_NULL:
+//     case ELFIO::SHT_SYMTAB:
+//     case ELFIO::SHT_STRTAB:
+//     case ELFIO::SHT_NOTE:
+//   }
+// }
+//
 bool isNullSection(const ELFIO::section *section) {
   return section->get_type() == ELFIO::SHT_NULL;
 }
 
 void cloneSections(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
+  std::cout << 123342;
   auto ogSections = ogExec.sections;
   for (size_t i = 0; i < ogSections.size(); ++i) {
     ELFIO::section *ogSection = ogSections[i];
 
     if (!shouldClone(ogSection))
       continue;
+
     std::cout << "cloning\n";
     dumpSection(ogSection, false);
     std::cout << '\n';
@@ -164,7 +172,7 @@ void cloneSections(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
     newSection->set_type(ogSection->get_type());
     newSection->set_flags(ogSection->get_flags());
     newSection->set_info(ogSection->get_info());
-    newSection->set_link(ogSection->get_link());
+    // newSection->set_link(ogSection->get_link());
     newSection->set_addr_align(ogSection->get_addr_align());
     newSection->set_entry_size(ogSection->get_entry_size());
     newSection->set_address(ogSection->get_address());
@@ -172,6 +180,10 @@ void cloneSections(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
 
     if (const char *contents = ogSection->get_data())
       newSection->set_data(contents, ogSection->get_size());
+
+
+    ogToNewSectionMap[ogSection] = newSection;
+    newToOgSectionMap[newSection] = ogSection;
   }
 }
 
@@ -224,19 +236,17 @@ void cloneSymbols(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   auto *newStrtab = newExec.sections.add(".strtab");
   newStrtab->set_type(ogStrtab->get_type());
   newStrtab->set_flags(ogStrtab->get_flags());
-  // newStrtab->set_info(ogStrtab->get_info ());
-  // newStrtab->set_link(ogStrtab->get_index());
-  // newStrtab->set_entry_size(ogStrtab->get_entry_size());
   newStrtab->set_addr_align(ogStrtab->get_addr_align());
 
   ELFIO::section *ogSymtab = getSymtabSection(ogExec);
 
-  // new symtab for cloning new symbols
+  // new symtab for cloning symbols
   auto *newSymtab = newExec.sections.add(".symtab");
   newSymtab->set_type(ogSymtab->get_type());
   newSymtab->set_flags(ogSymtab->get_flags());
   newSymtab->set_info(ogSymtab->get_info());
 
+  // link to the new .strtab
   newSymtab->set_link(newStrtab->get_index());
 
   newSymtab->set_entry_size(ogSymtab->get_entry_size());
@@ -250,6 +260,7 @@ void cloneSymbols(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   unsigned numSymbols = symtabAccessor.get_symbols_num();
   std::cout << numSymbols << " found\n";
 
+  
   SymbolInfo si;
   for (unsigned i = 0; i < numSymbols; ++i) {
     bool success =
@@ -262,21 +273,75 @@ void cloneSymbols(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
 
       // if (shouldClone(ogExec.sections[si.sectionIdx]) ||
       // isNullSection(ogExec.sections[si.sectionIdx]))
+
+      auto iter = ogToNewSectionMap.find(ogExec.sections[si.sectionIdx]);
+      unsigned newIdx = 0;
+      if (iter != ogToNewSectionMap.end())
+        newIdx = iter->second->get_index();
+
       newSymtabAccessor.add_symbol(newStrtabAccessor, si.name.c_str(), si.addr,
                                    si.size, si.bind, si.type, si.other,
-                                   si.sectionIdx);
+          newIdx);
     }
   }
 }
 
-void cloneRelocs(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
 
+bool doesSectionLinkToStrtab(const ELFIO::section *section) {
+  switch(section->get_type()) {
+    case ELFIO::SHT_DYNAMIC:
+    case ELFIO::SHT_SYMTAB:
+    case ELFIO::SHT_DYNSYM:
+      return true;
+    default:
+      return false;
+
+  }
+}
+
+bool doesSectionLinkToSymtab(const ELFIO::section *section) {
+  switch(section->get_type()) {
+    case ELFIO::SHT_HASH:
+    case ELFIO::SHT_REL:
+    case ELFIO::SHT_RELA:
+    case ELFIO::SHT_GROUP:
+    case ELFIO::SHT_SYMTAB_SHNDX:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void shouldNotChange(const ELFIO::section *section) {
+}
+
+void correctSectionLinks(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
+  auto ogSections = ogExec.sections;
+  auto newSections = newExec.sections;
+
+  for (size_t i = 0; i < newSections.size(); ++i) {
+      auto iter1 = newToOgSectionMap.find(newSections[i]);
+      if (iter1 == newToOgSectionMap.end())
+        continue;
+
+      auto *ogSection = iter1->second;
+      auto iter2 = ogToNewSectionMap.find(ogSection);
+      if (iter2 == ogToNewSectionMap.end())
+        continue;
+
+      // If ogSection's sh_link holds index in ogExec's section header table, we must update newSection's sh_link hold corresponding index in newExec's section header table.
+
+
+
+  }
 }
 
 void cloneExec(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   cloneHeader(ogExec, newExec);
   cloneSections(ogExec, newExec);
   cloneSymbols(ogExec, newExec);
+  correctSectionLinks(ogExec, newExec);
+
   // cloneRelocationSections(ogExec, newExec);
   // updateHeader(newExec);
   // cloneSegments(ogExec, newExec);
