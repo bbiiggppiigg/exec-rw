@@ -4,15 +4,26 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+
 #include <unordered_map>
 
+std::unordered_map<ELFIO::section *, ELFIO::section *> ogToNewSectionMap;
+std::unordered_map<ELFIO::section *, ELFIO::section *> newToOgSectionMap;
 
-
-// This tool creates a clone of the original executable. The goal is to eventually add a new section and a new segment while cloning.
-
-
-  std::unordered_map<ELFIO::section *, ELFIO::section *> ogToNewSectionMap;
-  std::unordered_map<ELFIO::section *, ELFIO::section *> newToOgSectionMap;
+// This tool creates a clone of the original executable. The goal is to
+// eventually add a new section and a new segment while cloning. Right now the
+// tool will ignore the fatbin parameter, till have the cloned executable
+// running.
+//
+// usage:
+// exec-rw <og-exec> <fatbin> <new-exec>
+//
+// As mentioned eariler, one can pass anything for <fatbin> as we aren't using
+// it right now.
+//
+// FIXME:
+// cloning any executable (not necessarily AMD ones) should work on x86-64 at
+// least, but the cloned executable halts with a segfault
 
 static void showHelp(const char *toolName) {
   std::cout << "usage : \n";
@@ -48,15 +59,6 @@ static void dumpSection(const ELFIO::section *section,
 
 // === SECTION-GETTING HELPERS BEGIN ===
 //
-ELFIO::section *getSymtabSection(const ELFIO::elfio &file) {
-  for (int i = 0; i < file.sections.size(); ++i) {
-    ELFIO::section *sec = file.sections[i];
-    if (sec->get_name() == ".symtab" && sec->get_type() == ELFIO::SHT_SYMTAB)
-      return file.sections[i];
-  }
-  return nullptr;
-}
-
 ELFIO::section *getStrtabSection(const ELFIO::elfio &file) {
   for (int i = 0; i < file.sections.size(); ++i) {
     ELFIO::section *sec = file.sections[i];
@@ -66,14 +68,24 @@ ELFIO::section *getStrtabSection(const ELFIO::elfio &file) {
   return nullptr;
 }
 
-ELFIO::section *getSectionStrtabSection(const ELFIO::elfio &file) {
+ELFIO::section *getSymtabSection(const ELFIO::elfio &file) {
   for (int i = 0; i < file.sections.size(); ++i) {
     ELFIO::section *sec = file.sections[i];
-    if (sec->get_name() == ".shstrtab" && sec->get_type() == ELFIO::SHT_STRTAB)
+    if (sec->get_name() == ".symtab" && sec->get_type() == ELFIO::SHT_SYMTAB)
       return file.sections[i];
   }
   return nullptr;
 }
+
+ELFIO::section *getDynsymSection(const ELFIO::elfio &file) {
+  for (int i = 0; i < file.sections.size(); ++i) {
+    ELFIO::section *sec = file.sections[i];
+    if (sec->get_name() == ".dynsym" && sec->get_type() == ELFIO::SHT_DYNSYM)
+      return file.sections[i];
+  }
+  return nullptr;
+}
+
 ELFIO::section *getFatbinSection(const ELFIO::elfio &file) {
   for (int i = 0; i < file.sections.size(); ++i) {
     if (file.sections[i]->get_name() == ".hip_fatbin")
@@ -92,28 +104,28 @@ ELFIO::section *getFatbinWrapperSection(const ELFIO::elfio &file) {
 //
 // === SECTION-GETTING HELPERS END ===
 
-static size_t getFileSizeAndReset(std::ifstream &openFile) {
-  openFile.seekg(0, std::ifstream::end);
-  size_t size = openFile.tellg();
-  openFile.seekg(0, std::ifstream::beg);
-  return size;
-}
-
-ELFIO::segment *getLastSegment(const ELFIO::elfio &execFile) {
-  const size_t numSegments = execFile.segments.size();
-  assert(numSegments != 0);
-
-  ELFIO::segment *theSegment = execFile.segments[0];
-  for (size_t i = 0; i < numSegments; ++i) {
-    ELFIO::segment *currSegment = execFile.segments[i];
-    if (currSegment->get_virtual_address() >
-        theSegment->get_virtual_address()) {
-      theSegment = currSegment;
-    }
-  }
-
-  return theSegment;
-}
+// static size_t getFileSizeAndReset(std::ifstream &openFile) {
+//   openFile.seekg(0, std::ifstream::end);
+//   size_t size = openFile.tellg();
+//   openFile.seekg(0, std::ifstream::beg);
+//   return size;
+// }
+//
+// ELFIO::segment *getLastSegment(const ELFIO::elfio &execFile) {
+//   const size_t numSegments = execFile.segments.size();
+//   assert(numSegments != 0);
+//
+//   ELFIO::segment *theSegment = execFile.segments[0];
+//   for (size_t i = 0; i < numSegments; ++i) {
+//     ELFIO::segment *currSegment = execFile.segments[i];
+//     if (currSegment->get_virtual_address() >
+//         theSegment->get_virtual_address()) {
+//       theSegment = currSegment;
+//     }
+//   }
+//
+//   return theSegment;
+// }
 
 void cloneHeader(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   newExec.create(ogExec.get_class(), ogExec.get_encoding());
@@ -129,33 +141,21 @@ void cloneHeader(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
 bool shouldClone(const ELFIO::section *section) {
   auto secType = section->get_type();
   switch (secType) {
-  // case ELFIO::SHT_NULL:
-  // case ELFIO::SHT_SYMTAB:
-  // case ELFIO::SHT_STRTAB:
-  case ELFIO::SHT_PROGBITS:
-  case ELFIO::SHT_NOBITS:
-    return true;
-  default:
+  case ELFIO::SHT_NULL:
     return false;
+
+  case ELFIO::SHT_STRTAB:
+    // Don't clone section header string table, ELFIO will create a new one
+    if (section->get_name() == ".shstrtab")
+      return false;
+    return true;
+
+  default:
+    return true;
   }
 }
 
-// bool shouldCloneContents(const ELFIO::section *section) {
-//   auto secType = section->get_type();
-//   switch(secType) {
-//     case ELFIO::SHT_NULL:
-//     case ELFIO::SHT_SYMTAB:
-//     case ELFIO::SHT_STRTAB:
-//     case ELFIO::SHT_NOTE:
-//   }
-// }
-//
-bool isNullSection(const ELFIO::section *section) {
-  return section->get_type() == ELFIO::SHT_NULL;
-}
-
 void cloneSections(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
-  std::cout << 123342;
   auto ogSections = ogExec.sections;
   for (size_t i = 0; i < ogSections.size(); ++i) {
     ELFIO::section *ogSection = ogSections[i];
@@ -172,7 +172,11 @@ void cloneSections(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
     newSection->set_type(ogSection->get_type());
     newSection->set_flags(ogSection->get_flags());
     newSection->set_info(ogSection->get_info());
-    // newSection->set_link(ogSection->get_link());
+
+    // NOTE: This can be incorrect link, and will be corrected later, after all
+    // sections are cloned.
+    newSection->set_link(ogSection->get_link());
+
     newSection->set_addr_align(ogSection->get_addr_align());
     newSection->set_entry_size(ogSection->get_entry_size());
     newSection->set_address(ogSection->get_address());
@@ -181,27 +185,10 @@ void cloneSections(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
     if (const char *contents = ogSection->get_data())
       newSection->set_data(contents, ogSection->get_size());
 
-
     ogToNewSectionMap[ogSection] = newSection;
     newToOgSectionMap[newSection] = ogSection;
   }
 }
-
-// void cloneSegments(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
-//   auto ogSegments = ogExec.segments;
-//   for (size_t i = 0; i < ogSegments.size(); ++i) {
-//     ELFIO::segment *ogSegment = ogSegments[i];
-//     ELFIO::segment *newSegment = newExec.segments.add();
-//     newSegment->set_type(ogSegment->get_type());
-//     newSegment->set_flags(ogSegment->get_flags());
-//     newSegment->set_align(ogSegment->get_align());
-//     newSegment->set_virtual_address(ogSegment->get_virtual_address());
-//     newSegment->set_physical_address(ogSegment->get_physical_address());
-//
-//     newSegment->set_file_size(ogSegment->get_file_size());
-//     newSegment->set_memory_size(ogSegment->get_memory_size());
-//   }
-// }
 
 struct SymbolInfo {
   std::string name;
@@ -213,142 +200,121 @@ struct SymbolInfo {
   unsigned char other = 0;
 };
 
-void dumpSymbolDetails(const SymbolInfo &symInfo) {
-  std::cout << "name : " << symInfo.name << ", "
-            << "addr : " << symInfo.addr << ", "
-            << "size : " << symInfo.size << ", "
-            << "bind : " << symInfo.bind << ", "
-            << "type : " << symInfo.type << ", "
-            << "sectionIdx : " << symInfo.sectionIdx << ", "
-            << "other : " << symInfo.other << '\n';
-}
-
-ELFIO::section *createStringSection(ELFIO::elfio &execFile) {
-  auto *strtab = execFile.sections.add(".strtab");
-  strtab->set_type(ELFIO::SHT_STRTAB);
-  strtab->set_addr_align(1);
-  return strtab;
-}
-
-void cloneSymbols(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
-  // create new strtab first
-  auto *ogStrtab = getStrtabSection(ogExec);
-  auto *newStrtab = newExec.sections.add(".strtab");
-  newStrtab->set_type(ogStrtab->get_type());
-  newStrtab->set_flags(ogStrtab->get_flags());
-  newStrtab->set_addr_align(ogStrtab->get_addr_align());
-
-  ELFIO::section *ogSymtab = getSymtabSection(ogExec);
-
-  // new symtab for cloning symbols
-  auto *newSymtab = newExec.sections.add(".symtab");
-  newSymtab->set_type(ogSymtab->get_type());
-  newSymtab->set_flags(ogSymtab->get_flags());
-  newSymtab->set_info(ogSymtab->get_info());
-
-  // link to the new .strtab
-  newSymtab->set_link(newStrtab->get_index());
-
-  newSymtab->set_entry_size(ogSymtab->get_entry_size());
-  newSymtab->set_addr_align(ogSymtab->get_addr_align());
-  ELFIO::symbol_section_accessor newSymtabAccessor(newExec, newSymtab);
-
-  ELFIO::string_section_accessor newStrtabAccessor(newStrtab);
-
-  // og symbol information for reference
-  ELFIO::symbol_section_accessor symtabAccessor(ogExec, ogSymtab);
-  unsigned numSymbols = symtabAccessor.get_symbols_num();
-  std::cout << numSymbols << " found\n";
-
-  
-  SymbolInfo si;
-  for (unsigned i = 0; i < numSymbols; ++i) {
-    bool success =
-        symtabAccessor.get_symbol(i, si.name, si.addr, si.size, si.bind,
-                                  si.type, si.sectionIdx, si.other);
-    if (success) {
-      dumpSymbolDetails(si);
-      // std::cout << "in " << ogExec.sections[si.sectionIdx]->get_name() <<
-      // '\n';
-
-      // if (shouldClone(ogExec.sections[si.sectionIdx]) ||
-      // isNullSection(ogExec.sections[si.sectionIdx]))
-
-      auto iter = ogToNewSectionMap.find(ogExec.sections[si.sectionIdx]);
-      unsigned newIdx = 0;
-      if (iter != ogToNewSectionMap.end())
-        newIdx = iter->second->get_index();
-
-      newSymtabAccessor.add_symbol(newStrtabAccessor, si.name.c_str(), si.addr,
-                                   si.size, si.bind, si.type, si.other,
-          newIdx);
-    }
-  }
-}
-
-
-bool doesSectionLinkToStrtab(const ELFIO::section *section) {
-  switch(section->get_type()) {
-    case ELFIO::SHT_DYNAMIC:
-    case ELFIO::SHT_SYMTAB:
-    case ELFIO::SHT_DYNSYM:
-      return true;
-    default:
-      return false;
-
-  }
-}
-
-bool doesSectionLinkToSymtab(const ELFIO::section *section) {
-  switch(section->get_type()) {
-    case ELFIO::SHT_HASH:
-    case ELFIO::SHT_REL:
-    case ELFIO::SHT_RELA:
-    case ELFIO::SHT_GROUP:
-    case ELFIO::SHT_SYMTAB_SHNDX:
-      return true;
-    default:
-      return false;
-  }
-}
-
-void shouldNotChange(const ELFIO::section *section) {
-}
+// bool doesSectionLinkToStrtab(const ELFIO::section *section) {
+//   switch(section->get_type()) {
+//     case ELFIO::SHT_DYNAMIC:
+//     case ELFIO::SHT_SYMTAB:
+//     case ELFIO::SHT_DYNSYM:
+//
+//     case ELFIO::SHT_GNU_verdef:
+//     case ELFIO::SHT_GNU_verneed:
+//
+//       return true;
+//     default:
+//       return false;
+//   }
+// }
+//
+// bool doesSectionLinkToDynsym(const ELFIO::section *section) {
+//   switch(section->get_type()) {
+//     case ELFIO::SHT_GNU_versym:
+//     case ELFIO::SHT_GNU_HASH:
+//     case ELFIO::SHT_DYNAMIC:
+//       return true;
+//
+//     default:
+//       return false;
+//   }
+// }
+//
+// bool doesSectionLinkToSymtab(const ELFIO::section *section) {
+//   switch(section->get_type()) {
+//     case ELFIO::SHT_HASH:
+//     case ELFIO::SHT_REL:
+//     case ELFIO::SHT_RELA:
+//     case ELFIO::SHT_GROUP:
+//     case ELFIO::SHT_SYMTAB_SHNDX:
+//       return true;
+//
+//     default:
+//       return false;
+//   }
+// }
 
 void correctSectionLinks(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   auto ogSections = ogExec.sections;
   auto newSections = newExec.sections;
 
+  // If ogSection's sh_link holds index in ogExec's section header table, we
+  // must update newSection's sh_link hold corresponding index in newExec's
+  // section header table.
   for (size_t i = 0; i < newSections.size(); ++i) {
-      auto iter1 = newToOgSectionMap.find(newSections[i]);
-      if (iter1 == newToOgSectionMap.end())
-        continue;
+    auto *currentNewSection = newSections[i];
 
-      auto *ogSection = iter1->second;
-      auto iter2 = ogToNewSectionMap.find(ogSection);
-      if (iter2 == ogToNewSectionMap.end())
-        continue;
+    auto iter1 = newToOgSectionMap.find(currentNewSection);
+    if (iter1 == newToOgSectionMap.end())
+      continue;
 
-      // If ogSection's sh_link holds index in ogExec's section header table, we must update newSection's sh_link hold corresponding index in newExec's section header table.
+    auto *ogSection = iter1->second;
+    auto ogLinkSectionIdx = ogSection->get_link();
+    auto *ogLinkSection = ogSections[ogLinkSectionIdx];
 
+    auto iter2 = ogToNewSectionMap.find(ogLinkSection);
+    if (iter2 == ogToNewSectionMap.end())
+      continue;
 
+    auto *newLinkSection = iter2->second;
+    auto newLinkSectionIdx = newLinkSection->get_index();
+    currentNewSection->set_link(newLinkSectionIdx);
+  }
+}
 
+void cloneSegments(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
+  auto ogSegments = ogExec.segments;
+  for (size_t i = 0; i < ogSegments.size(); ++i) {
+    ELFIO::segment *ogSegment = ogSegments[i];
+    ELFIO::segment *newSegment = newExec.segments.add();
+    newSegment->set_type(ogSegment->get_type());
+    newSegment->set_flags(ogSegment->get_flags());
+    newSegment->set_align(ogSegment->get_align());
+    newSegment->set_virtual_address(ogSegment->get_virtual_address());
+    newSegment->set_physical_address(ogSegment->get_physical_address());
+
+    newSegment->set_file_size(ogSegment->get_file_size());
+    newSegment->set_memory_size(ogSegment->get_memory_size());
+  }
+
+  auto newSegments = newExec.segments;
+  auto newSections = newExec.sections;
+
+  // Now map new sections into new segments
+  for (size_t i = 0; i < newSections.size(); ++i) {
+    auto currSection = newSections[i];
+    auto currSectionBegin = currSection->get_address();
+    auto currSectionSize = currSection->get_size();
+    auto currSectionEnd = currSectionBegin + currSectionSize;
+    auto currSectionAlign = currSection->get_addr_align();
+
+    for (size_t j = 0; j < newSegments.size(); ++j) {
+      auto newSegmentBegin = newSegments[j]->get_virtual_address();
+      auto newSegmentSize = newSegments[j]->get_memory_size();
+      auto newSegmentEnd = newSegmentBegin + newSegmentSize;
+      bool c1 = currSectionBegin >= newSegmentBegin &&
+                currSectionBegin < newSegmentEnd;
+      bool c2 = currSectionEnd <= newSegmentEnd;
+      if (c1 && c2) {
+        newSegments[j]->add_section(currSection, 1);
+      }
+    }
   }
 }
 
 void cloneExec(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   cloneHeader(ogExec, newExec);
   cloneSections(ogExec, newExec);
-  cloneSymbols(ogExec, newExec);
   correctSectionLinks(ogExec, newExec);
-
-  // cloneRelocationSections(ogExec, newExec);
-  // updateHeader(newExec);
-  // cloneSegments(ogExec, newExec);
+  cloneSegments(ogExec, newExec);
 }
-
-
-
 
 int main(int argc, char **argv) {
   if (argc != 4) {
