@@ -129,7 +129,6 @@ ELFIO::section *getFatbinWrapperSection(const ELFIO::elfio &file) {
 
 void cloneHeader(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   newExec.create(ogExec.get_class(), ogExec.get_encoding());
-  // newExec.set_version(ogExec.get_version());
   newExec.set_os_abi(ogExec.get_os_abi());
   newExec.set_abi_version(ogExec.get_abi_version());
   newExec.set_type(ogExec.get_type());
@@ -189,57 +188,6 @@ void cloneSections(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
     newToOgSectionMap[newSection] = ogSection;
   }
 }
-
-struct SymbolInfo {
-  std::string name;
-  ELFIO::Elf64_Addr addr = 0;
-  ELFIO::Elf_Xword size = 0;
-  unsigned char bind = 0;
-  unsigned char type = 0;
-  ELFIO::Elf_Half sectionIdx = 0;
-  unsigned char other = 0;
-};
-
-// bool doesSectionLinkToStrtab(const ELFIO::section *section) {
-//   switch(section->get_type()) {
-//     case ELFIO::SHT_DYNAMIC:
-//     case ELFIO::SHT_SYMTAB:
-//     case ELFIO::SHT_DYNSYM:
-//
-//     case ELFIO::SHT_GNU_verdef:
-//     case ELFIO::SHT_GNU_verneed:
-//
-//       return true;
-//     default:
-//       return false;
-//   }
-// }
-//
-// bool doesSectionLinkToDynsym(const ELFIO::section *section) {
-//   switch(section->get_type()) {
-//     case ELFIO::SHT_GNU_versym:
-//     case ELFIO::SHT_GNU_HASH:
-//     case ELFIO::SHT_DYNAMIC:
-//       return true;
-//
-//     default:
-//       return false;
-//   }
-// }
-//
-// bool doesSectionLinkToSymtab(const ELFIO::section *section) {
-//   switch(section->get_type()) {
-//     case ELFIO::SHT_HASH:
-//     case ELFIO::SHT_REL:
-//     case ELFIO::SHT_RELA:
-//     case ELFIO::SHT_GROUP:
-//     case ELFIO::SHT_SYMTAB_SHNDX:
-//       return true;
-//
-//     default:
-//       return false;
-//   }
-// }
 
 void correctSectionLinks(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   auto ogSections = ogExec.sections;
