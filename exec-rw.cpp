@@ -4,26 +4,17 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
-
 #include <unordered_map>
 
-std::unordered_map<ELFIO::section *, ELFIO::section *> ogToNewSectionMap;
-std::unordered_map<ELFIO::section *, ELFIO::section *> newToOgSectionMap;
-
-// This tool creates a clone of the original executable. The goal is to
-// eventually add a new section and a new segment while cloning. Right now the
-// tool will ignore the fatbin parameter, till have the cloned executable
-// running.
+// This tool creates a clone of the original executable, and adds the new fatbin
+// to the clone.
 //
 // usage:
 // exec-rw <og-exec> <fatbin> <new-exec>
-//
-// As mentioned eariler, one can pass anything for <fatbin> as we aren't using
-// it right now.
-//
-// FIXME:
-// cloning any executable (not necessarily AMD ones) should work on x86-64 at
-// least, but the cloned executable halts with a segfault
+
+// These maps are for correcting the section links in the clone.
+std::unordered_map<ELFIO::section *, ELFIO::section *> ogToNewSectionMap;
+std::unordered_map<ELFIO::section *, ELFIO::section *> newToOgSectionMap;
 
 static void showHelp(const char *toolName) {
   std::cout << "usage : \n";
@@ -86,46 +77,56 @@ ELFIO::section *getDynsymSection(const ELFIO::elfio &file) {
   return nullptr;
 }
 
-ELFIO::section *getFatbinSection(const ELFIO::elfio &file) {
+ELFIO::section *getSection(const std::string &sectionName,
+                           const ELFIO::elfio &file) {
   for (int i = 0; i < file.sections.size(); ++i) {
-    if (file.sections[i]->get_name() == ".hip_fatbin")
+    if (file.sections[i]->get_name() == sectionName)
       return file.sections[i];
   }
   return nullptr;
 }
 
+ELFIO::section *getFatbinSection(const ELFIO::elfio &file) {
+  return getSection(".hip_fatbin", file);
+}
+
 ELFIO::section *getFatbinWrapperSection(const ELFIO::elfio &file) {
-  for (int i = 0; i < file.sections.size(); ++i) {
-    if (file.sections[i]->get_name() == ".hipFatBinSegment")
-      return file.sections[i];
-  }
-  return nullptr;
+  return getSection(".hipFatBinSegment", file);
 }
 //
 // === SECTION-GETTING HELPERS END ===
 
-// static size_t getFileSizeAndReset(std::ifstream &openFile) {
-//   openFile.seekg(0, std::ifstream::end);
-//   size_t size = openFile.tellg();
-//   openFile.seekg(0, std::ifstream::beg);
-//   return size;
-// }
-//
-// ELFIO::segment *getLastSegment(const ELFIO::elfio &execFile) {
-//   const size_t numSegments = execFile.segments.size();
-//   assert(numSegments != 0);
-//
-//   ELFIO::segment *theSegment = execFile.segments[0];
-//   for (size_t i = 0; i < numSegments; ++i) {
-//     ELFIO::segment *currSegment = execFile.segments[i];
-//     if (currSegment->get_virtual_address() >
-//         theSegment->get_virtual_address()) {
-//       theSegment = currSegment;
-//     }
-//   }
-//
-//   return theSegment;
-// }
+static size_t getFileSizeAndReset(std::ifstream &file) {
+  assert(file.is_open());
+
+  file.seekg(0, std::ifstream::end);
+  size_t size = file.tellg();
+  file.seekg(0, std::ifstream::beg);
+  return size;
+}
+
+ELFIO::segment *getLastSegment(const ELFIO::elfio &execFile) {
+  const size_t numSegments = execFile.segments.size();
+  assert(numSegments != 0);
+
+  ELFIO::segment *lastSegment = execFile.segments[0];
+  for (size_t i = 0; i < numSegments; ++i) {
+    ELFIO::segment *currSegment = execFile.segments[i];
+    size_t currSegmentBegin = currSegment->get_virtual_address();
+    size_t currSegmentSize = currSegment->get_memory_size();
+    size_t currSegmentEnd = currSegmentBegin + currSegmentSize;
+
+    size_t lastSegmentBegin = lastSegment->get_virtual_address();
+    size_t lastSegmentSize = lastSegment->get_memory_size();
+    size_t lastSegmentEnd = lastSegmentBegin + lastSegmentSize;
+
+    if (currSegmentEnd > lastSegmentEnd) {
+      lastSegment = currSegment;
+    }
+  }
+
+  return lastSegment;
+}
 
 void cloneHeader(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   newExec.create(ogExec.get_class(), ogExec.get_encoding());
@@ -264,6 +265,55 @@ void cloneExec(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   cloneSegments(ogExec, newExec);
 }
 
+void updateFatbinAddr(ELFIO::elfio &execFile, uint64_t newAddr) {
+  ELFIO::section *fatbinWrapperSection = getFatbinWrapperSection(execFile);
+
+  // address is at offset 8.
+  uint64_t *addrPtr = (uint64_t *)(fatbinWrapperSection->get_data() + 8);
+  *addrPtr = newAddr;
+}
+
+// Create a .new_fatbin section, map it to a new PT_LOAD segment, update the
+// fatbin wrapper.
+void addNewFatbin(ELFIO::elfio &newExec, const char *newFatbinContent,
+                  size_t newFatbinSize) {
+
+  ELFIO::section *fatbinSection = getFatbinSection(newExec);
+  assert(fatbinSection);
+
+  // Calculate next virtual address for loading the new fatbin.
+  ELFIO::segment *lastSegment = getLastSegment(newExec);
+  size_t nextAddr =
+      lastSegment->get_virtual_address() + lastSegment->get_memory_size();
+
+  size_t alignment = fatbinSection->get_addr_align();
+  assert(alignment != 0);
+
+  while (nextAddr % alignment != 0) {
+    ++nextAddr;
+  }
+
+  ELFIO::section *newFatbinSection = newExec.sections.add(".new_fatbin");
+  newFatbinSection->set_type(fatbinSection->get_type());
+  newFatbinSection->set_flags(fatbinSection->get_flags());
+  newFatbinSection->set_info(fatbinSection->get_info());
+  newFatbinSection->set_addr_align(fatbinSection->get_addr_align());
+  newFatbinSection->set_entry_size(fatbinSection->get_entry_size());
+  newFatbinSection->set_size(newFatbinSize);
+  newFatbinSection->set_data(newFatbinContent, newFatbinSize);
+  newFatbinSection->set_address(nextAddr);
+
+  ELFIO::segment *newSegment = newExec.segments.add();
+  newSegment->set_type(ELFIO::PT_LOAD);
+  newSegment->set_flags(ELFIO::PF_R);
+  newSegment->set_align(fatbinSection->get_addr_align());
+  newSegment->set_virtual_address(nextAddr);
+  newSegment->set_physical_address(nextAddr);
+
+  newSegment->add_section(newFatbinSection, 1);
+  updateFatbinAddr(newExec, nextAddr);
+}
+
 int main(int argc, char **argv) {
   if (argc != 4) {
     std::cout << "exactly 3 arguments to " << argv[0] << " expected\n";
@@ -284,31 +334,31 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
+  ELFIO::section *fatbinSection = getFatbinSection(execFile);
+  if (!fatbinSection) {
+    std::cout << ".hip_fatbin section not found in " << execFilePath << "\n";
+    exit(1);
+  }
+
+  ELFIO::section *fatbinWrapperSection = getFatbinWrapperSection(execFile);
+  if (!fatbinWrapperSection) {
+    std::cout << ".hipFatBinSegment section not found in " << execFilePath
+              << "\n";
+    exit(1);
+  }
+
   cloneExec(execFile, newExecFile);
+
+  newFatbin.open(newFatbinPath, std::ios::in);
+  size_t newFatbinSize = getFileSizeAndReset(newFatbin);
+  char *newFatbinContent = new char[newFatbinSize];
+
+  newFatbin.read(newFatbinContent, newFatbinSize);
+  addNewFatbin(newExecFile, newFatbinContent, newFatbinSize);
+
+  delete[] newFatbinContent;
+  newFatbin.close();
+
   std::cout << newExecFile.validate() << '\n';
   newExecFile.save(rwExecPath);
-
-
-  // ELFIO::section *fatbinSection = getFatbinSection(execFile);
-  // if (!fatbinSection) {
-  //   std::cout << ".hip_fatbin section in " << execFilePath << "\n";
-  //   exit(1);
-  // }
-  //
-  // ELFIO::section *fatbinWrapperSection = getFatbinWrapperSection(execFile);
-  //
-  // dumpSection(fatbinSection, false);
-  // std::cout << '\n';
-  // dumpSection(fatbinWrapperSection);
-  // std::cout << std::endl;
-  //
-  // std::cout << execFile.validate() << '\n';
-  //
-  // newFatbin.open(newFatbinPath, std::ios::in);
-  // size_t newFatbinSize = getFileSizeAndReset(newFatbin);
-  // if (newFatbinSize > fatbinSection->get_size()) {
-  //   std::cout
-  //       << "new fatbin is bigger than the one present in the executable\n";
-  //   std::cout << "appending new fatbin and updating binary...\n";
-  // }
 }
