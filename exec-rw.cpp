@@ -1,6 +1,7 @@
 #include "elfio/elfio.hpp"
 
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -103,6 +104,25 @@ static size_t getFileSizeAndReset(std::ifstream &file) {
   size_t size = file.tellg();
   file.seekg(0, std::ifstream::beg);
   return size;
+}
+
+ELFIO::segment *getPtLoad1(const ELFIO::elfio &file) {
+  for (int i = 0; i < file.sections.size(); ++i) {
+    auto segment = file.segments[i];
+    if (segment->get_type() == ELFIO::PT_LOAD)
+      return segment;
+  }
+  return nullptr;
+}
+
+ELFIO::segment *getPhdrSegment(const ELFIO::elfio &file) {
+  size_t entryPoint = file.get_entry();
+  for (int i = 0; i < file.sections.size(); ++i) {
+    auto segment = file.segments[i];
+    if (segment->get_type() == ELFIO::PT_PHDR)
+      return segment;
+  }
+  return nullptr;
 }
 
 ELFIO::segment *getLastSegment(const ELFIO::elfio &execFile) {
@@ -314,6 +334,82 @@ void addNewFatbin(ELFIO::elfio &newExec, const char *newFatbinContent,
   updateFatbinAddr(newExec, nextAddr);
 }
 
+// This is for patching the clone at last. For some reason, editing raw segments
+// doesn't work with ELFIO. The macros in elf.h conflict with ELFIO's constants,
+// hence keeping the include here.
+#include <elf.h>
+
+void patchExec(const char *rwExecPath) {
+  ELFIO::elfio newExecFile;
+  FILE *rawNewElf = fopen(rwExecPath, "rb+");
+
+  if (!rawNewElf || !newExecFile.load(rwExecPath)) {
+    std::cout << "can't find or process new ELF file " << rwExecPath << '\n';
+    exit(1);
+  }
+
+  ELFIO::segment *ptLoad1 = getPtLoad1(newExecFile);
+  uint64_t ptLoad1Offset = ptLoad1->get_offset();
+  ELFIO::segment *phdrSeg = getPhdrSegment(newExecFile);
+
+  char *ptLoad1Data = (char *)ptLoad1->get_data();
+  char *pHdrs = (char *)phdrSeg->get_data();
+
+  size_t numZeroes = 0;
+  for (size_t i = 0; i < ptLoad1->get_memory_size() && ptLoad1Data[i] == 0;
+       ++i) {
+    ++numZeroes;
+  }
+
+  if (numZeroes < phdrSeg->get_memory_size()) {
+    std::cout
+        << "can't patch final executable, please explicitly use ld to run it\n";
+    exit(1);
+  }
+
+  // Step 1. Copy program header table to beginning of PT_LOAD1.
+  std::cout << "Copying program header table to beginning of PT_LOAD1...\n";
+  if (fseek(rawNewElf, ptLoad1Offset, SEEK_SET)) {
+    std::cout << "error going to " << ptLoad1Offset << '\n';
+    exit(1);
+  }
+  std::cout << fwrite(pHdrs, sizeof(char), phdrSeg->get_file_size(), rawNewElf)
+            << " bytes written to PT_LOAD1\n";
+
+  std::cout << '\n';
+  assert(fseek(rawNewElf, ptLoad1Offset, SEEK_SET) == 0);
+
+  // Step 2. Update PT_LOAD1's program header (the one present in PT_LOAD1).
+  // Update the p_vaddr should hold the address of PT_LOAD1
+  Elf64_Phdr progHeader;
+  std::cout << "Updating PT_LOAD1's program header in PT_LOAD1...\n";
+  std::cout << fread(&progHeader, sizeof(Elf64_Phdr), 1, rawNewElf)
+            << " Elf64_Phdrs read from beginning of PT_LOAD1\n";
+  progHeader.p_vaddr = ptLoad1->get_virtual_address();
+  progHeader.p_paddr = ptLoad1->get_physical_address();
+  assert(fseek(rawNewElf, ptLoad1Offset, SEEK_SET) == 0);
+  std::cout << fwrite(&progHeader, sizeof(Elf64_Phdr), 1, rawNewElf)
+            << " Elf64_Phdrs written to beginning of PT_LOAD1\n";
+
+  std::cout << '\n';
+
+  // Step 3. Update ELF header on disk.
+  // The offset of program header table should be offset of PT_LOAD1.
+  std::cout << "Updating ELF header's e_phoff to PT_LOAD1's offset...\n";
+  Elf64_Ehdr elfHeader;
+  assert(fseek(rawNewElf, 0, SEEK_SET) == 0);
+  std::cout << (fread(&elfHeader, sizeof(Elf64_Ehdr), 1, rawNewElf))
+            << " Elf64_Ehdrs read from beginning of " << rwExecPath << '\n';
+  std::cout << "old e_phoff : " << elfHeader.e_phoff << '\n';
+  elfHeader.e_phoff = ptLoad1->get_offset();
+  std::cout << "new e_phoff : " << elfHeader.e_phoff << '\n';
+  assert(fseek(rawNewElf, 0, SEEK_SET) == 0);
+  std::cout << fwrite(&elfHeader, sizeof(Elf64_Ehdr), 1, rawNewElf)
+            << " Elf64_Ehdrs written to beginning of " << rwExecPath << '\n';
+
+  fclose(rawNewElf);
+}
+
 int main(int argc, char **argv) {
   if (argc != 4) {
     std::cout << "exactly 3 arguments to " << argv[0] << " expected\n";
@@ -361,4 +457,7 @@ int main(int argc, char **argv) {
 
   std::cout << newExecFile.validate() << '\n';
   newExecFile.save(rwExecPath);
+
+  // To ensure that the linux kernel loader picks up the program headers.
+  patchExec(rwExecPath);
 }
