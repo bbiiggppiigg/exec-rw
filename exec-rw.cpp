@@ -7,8 +7,9 @@
 #include <iostream>
 #include <unordered_map>
 
-// This tool creates a clone of the original executable, and adds the new fatbin
-// to the clone.
+// This tool creates a clone of the original executable, adds the new fatbin
+// to the clone, and later patches the clone so that the Linux kernel loader can
+// see the program headers.
 //
 // usage:
 // exec-rw <og-exec> <fatbin> <new-exec>
@@ -51,33 +52,6 @@ static void dumpSection(const ELFIO::section *section,
 
 // === SECTION-GETTING HELPERS BEGIN ===
 //
-ELFIO::section *getStrtabSection(const ELFIO::elfio &file) {
-  for (int i = 0; i < file.sections.size(); ++i) {
-    ELFIO::section *sec = file.sections[i];
-    if (sec->get_name() == ".strtab" && sec->get_type() == ELFIO::SHT_STRTAB)
-      return file.sections[i];
-  }
-  return nullptr;
-}
-
-ELFIO::section *getSymtabSection(const ELFIO::elfio &file) {
-  for (int i = 0; i < file.sections.size(); ++i) {
-    ELFIO::section *sec = file.sections[i];
-    if (sec->get_name() == ".symtab" && sec->get_type() == ELFIO::SHT_SYMTAB)
-      return file.sections[i];
-  }
-  return nullptr;
-}
-
-ELFIO::section *getDynsymSection(const ELFIO::elfio &file) {
-  for (int i = 0; i < file.sections.size(); ++i) {
-    ELFIO::section *sec = file.sections[i];
-    if (sec->get_name() == ".dynsym" && sec->get_type() == ELFIO::SHT_DYNSYM)
-      return file.sections[i];
-  }
-  return nullptr;
-}
-
 ELFIO::section *getSection(const std::string &sectionName,
                            const ELFIO::elfio &file) {
   for (int i = 0; i < file.sections.size(); ++i) {
@@ -157,10 +131,8 @@ void cloneHeader(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
   newExec.set_entry(ogExec.get_entry());
 }
 
-
 bool shouldClone(const ELFIO::section *section) {
-  auto secType = section->get_type();
-  switch (secType) {
+  switch (section->get_type()) {
   case ELFIO::SHT_NULL:
     return false;
 
@@ -262,7 +234,6 @@ void cloneSegments(const ELFIO::elfio &ogExec, ELFIO::elfio &newExec) {
     auto currSectionBegin = currSection->get_address();
     auto currSectionSize = currSection->get_size();
     auto currSectionEnd = currSectionBegin + currSectionSize;
-    auto currSectionAlign = currSection->get_addr_align();
 
     for (size_t j = 0; j < newSegments.size(); ++j) {
       auto newSegmentBegin = newSegments[j]->get_virtual_address();
@@ -375,22 +346,21 @@ void patchExec(const char *rwExecPath) {
   }
   std::cout << fwrite(pHdrs, sizeof(char), phdrSeg->get_file_size(), rawNewElf)
             << " bytes written to PT_LOAD1\n";
-
   std::cout << '\n';
-  assert(fseek(rawNewElf, ptLoad1Offset, SEEK_SET) == 0);
 
   // Step 2. Update PT_LOAD1's program header (the one present in PT_LOAD1).
   // Update the p_vaddr should hold the address of PT_LOAD1
+  assert(fseek(rawNewElf, ptLoad1Offset, SEEK_SET) == 0);
   Elf64_Phdr progHeader;
   std::cout << "Updating PT_LOAD1's program header in PT_LOAD1...\n";
   std::cout << fread(&progHeader, sizeof(Elf64_Phdr), 1, rawNewElf)
             << " Elf64_Phdrs read from beginning of PT_LOAD1\n";
+
   progHeader.p_vaddr = ptLoad1->get_virtual_address();
   progHeader.p_paddr = ptLoad1->get_physical_address();
   assert(fseek(rawNewElf, ptLoad1Offset, SEEK_SET) == 0);
   std::cout << fwrite(&progHeader, sizeof(Elf64_Phdr), 1, rawNewElf)
             << " Elf64_Phdrs written to beginning of PT_LOAD1\n";
-
   std::cout << '\n';
 
   // Step 3. Update ELF header on disk.
@@ -400,9 +370,11 @@ void patchExec(const char *rwExecPath) {
   assert(fseek(rawNewElf, 0, SEEK_SET) == 0);
   std::cout << (fread(&elfHeader, sizeof(Elf64_Ehdr), 1, rawNewElf))
             << " Elf64_Ehdrs read from beginning of " << rwExecPath << '\n';
+
   std::cout << "old e_phoff : " << elfHeader.e_phoff << '\n';
   elfHeader.e_phoff = ptLoad1->get_offset();
   std::cout << "new e_phoff : " << elfHeader.e_phoff << '\n';
+
   assert(fseek(rawNewElf, 0, SEEK_SET) == 0);
   std::cout << fwrite(&elfHeader, sizeof(Elf64_Ehdr), 1, rawNewElf)
             << " Elf64_Ehdrs written to beginning of " << rwExecPath << '\n';
