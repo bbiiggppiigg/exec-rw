@@ -2,7 +2,6 @@
 
 #include <cassert>
 #include <cstdio>
-#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <unordered_map>
@@ -22,10 +21,10 @@ static void showHelp(const char *toolName) {
   std::cout << "usage : \n";
   std::cout << "  ";
   std::cout << toolName
-            << " <path-to-exe> <path-to-fatbin> <path-to-rewritten-exe> \n\n";
-  std::cout << toolName
-            << " will rewrite <path-to-exe> as <path-to-rewritten-exe> "
-               "containing <path-to-fatbin> instead of original fatbin\n";
+            << " <path-to-exe> <path-to-fatbin> <path-to-new-exe> \n\n";
+  std::cout
+      << toolName
+      << " will emit a new executable containing the fatbin passed via CLI\n";
 }
 
 static void dumpSection(const ELFIO::section *section,
@@ -349,7 +348,7 @@ void patchExec(const char *rwExecPath) {
   std::cout << '\n';
 
   // Step 2. Update PT_LOAD1's program header (the one present in PT_LOAD1).
-  // Update the p_vaddr should hold the address of PT_LOAD1
+  // Update p_vaddr to hold the address of PT_LOAD1
   assert(fseek(rawNewElf, ptLoad1Offset, SEEK_SET) == 0);
   Elf64_Phdr progHeader;
   std::cout << "Updating PT_LOAD1's program header in PT_LOAD1...\n";
