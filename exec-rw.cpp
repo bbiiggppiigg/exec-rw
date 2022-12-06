@@ -80,7 +80,7 @@ static size_t getFileSizeAndReset(std::ifstream &file) {
 }
 
 ELFIO::segment *getPtLoad1(const ELFIO::elfio &file) {
-  for (int i = 0; i < file.sections.size(); ++i) {
+  for (int i = 0; i < file.segments.size(); ++i) {
     auto segment = file.segments[i];
     if (segment->get_type() == ELFIO::PT_LOAD)
       return segment;
@@ -90,7 +90,7 @@ ELFIO::segment *getPtLoad1(const ELFIO::elfio &file) {
 
 ELFIO::segment *getPhdrSegment(const ELFIO::elfio &file) {
   size_t entryPoint = file.get_entry();
-  for (int i = 0; i < file.sections.size(); ++i) {
+  for (int i = 0; i < file.segments.size(); ++i) {
     auto segment = file.segments[i];
     if (segment->get_type() == ELFIO::PT_PHDR)
       return segment;
